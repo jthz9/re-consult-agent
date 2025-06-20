@@ -36,6 +36,9 @@ class IntentClassifier:
                 "종합", "전체", "모든", "상세", "자세", "완전",
                 "비용과", "정책과", "경제성과", "분석과",
                 "비교", "대조", "함께", "동시에", "모두"
+            ],
+            "followup": [
+                "더", "자세히", "방금", "그건", "이어서", "추가로", "계속", "이전", "아까", "그거", "그 부분", "그 내용", "설명해줘", "알려줘", "어떻게", "구체적으로"
             ]
         }
         
@@ -52,29 +55,26 @@ class IntentClassifier:
             },
             "comprehensive": {
                 "종합": 3, "전체": 2, "모든": 2, "비교": 2
+            },
+            "followup": {
+                "더": 2, "자세히": 2, "방금": 2, "이어서": 2, "추가로": 2, "계속": 2, "이전": 2, "어떻게": 2
             }
         }
 
     def classify(self, user_input: str) -> str:
-        """사용자 입력의 의도 분류"""
-        
+        """사용자 입력의 의도 분류 (followup 우선)"""
         if not user_input or not user_input.strip():
             return "policy_info"  # 기본값
-        
         user_input_lower = user_input.lower()
-        
-        # 키워드 기반 분류
         intent_scores = self._calculate_intent_scores(user_input_lower)
-        
-        # 복합 의도 감지
+        # followup intent가 있으면 우선 반환
+        if intent_scores.get("followup", 0) > 0:
+            return "followup"
         if self._is_comprehensive_intent(intent_scores):
             return "comprehensive"
-        
-        # 가장 높은 점수의 의도 반환
         if intent_scores:
             return max(intent_scores, key=intent_scores.get)
-        
-        return "policy_info"  # 기본값
+        return "policy_info"
     
     def _calculate_intent_scores(self, user_input: str) -> Dict[str, float]:
         """의도별 점수 계산"""
@@ -148,15 +148,14 @@ class IntentClassifier:
         return max_intent, confidence
     
     def get_intent_description(self, intent: str) -> str:
-        """의도에 대한 설명 반환"""
-        
+        """의도에 대한 설명 반환 (followup 추가)"""
         descriptions = {
             "policy_info": "정책/제도 정보 질문",
             "prediction": "발전량/경제성 예측 질문", 
             "weather": "기상 정보 질문",
-            "comprehensive": "종합 분석 질문"
+            "comprehensive": "종합 분석 질문",
+            "followup": "이전 대화에 대한 후속 질문"
         }
-        
         return descriptions.get(intent, "알 수 없는 의도")
 
 

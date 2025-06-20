@@ -9,6 +9,7 @@ import sys
 import os
 from langchain.memory import ConversationBufferWindowMemory
 from langchain.schema import HumanMessage, AIMessage
+import re
 
 # 상위 디렉토리를 Python 경로에 추가
 current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -35,62 +36,68 @@ class ChatbotAgent:
         self.memory = ConversationBufferWindowMemory(k=10, memory_key="chat_history", return_messages=True)
 
     def process_message(self, user_input: str) -> str:
-        """사용자 메시지 처리 (LangChain 메모리 기반)"""
+        """사용자 메시지 처리 (LangChain 메모리 기반, 멀티턴 프롬프트 지원, 지시어 치환 고도화)"""
         try:
-            # 1. LangChain 메모리에 사용자 메시지 추가
             self.memory.chat_memory.add_user_message(user_input)
-
-            # 2. 의도 분석
+            history_msgs = self.memory.chat_memory.messages[-10:-1]
+            history_str = ""
+            for msg in history_msgs:
+                if isinstance(msg, HumanMessage):
+                    history_str += f"사용자: {msg.content}\n"
+                elif isinstance(msg, AIMessage):
+                    history_str += f"챗봇: {msg.content}\n"
             intent, confidence = self.intent_classifier.get_intent_confidence(user_input)
-            # 3. 도구 선택 및 실행
-            results = self.execute_tools(user_input, intent)
-            # 4. 결과 통합
+            if intent == "followup":
+                prev_msgs = self.memory.chat_memory.messages[-3:-1]  # 직전 질문/답변
+                prev_context = ""
+                prev_question = ""
+                for msg in prev_msgs:
+                    if isinstance(msg, HumanMessage):
+                        prev_context += f"이전 질문: {msg.content}\n"
+                        prev_question = msg.content
+                    elif isinstance(msg, AIMessage):
+                        prev_context += f"이전 답변: {msg.content}\n"
+                # 1. 직전 질문에서 핵심 명사(가장 긴 단어)를 추출 (간단 버전)
+                words = re.findall(r'[가-힣A-Za-z0-9]+', prev_question)
+                keyword = max(words, key=len) if words else "이 제도"
+                # 2. 후속질문 내 모든 지시어(조사 포함)를 keyword로 치환
+                # ex: '이 제도의', '그런 경우에는', '이것은', '그 정책은' 등
+                anaphora_pattern = r'(이|그|저)(런|것|제도|정책|내용|부분|경우)?(은|는|이|가|을|를|의)?'
+                replaced_question = re.sub(anaphora_pattern, keyword, user_input)
+                rag_input = f"{prev_context}후속 질문: {replaced_question}"
+                results = self.execute_tools(rag_input, "policy_info", history=history_str)
+            else:
+                results = self.execute_tools(user_input, intent, history=history_str)
             final_response = self.response_integrator.integrate(results, intent)
-
-            # 5. LangChain 메모리에 챗봇 응답 추가
             self.memory.chat_memory.add_ai_message(final_response)
-
             return final_response
         except Exception as e:
             error_msg = f"메시지 처리 중 오류가 발생했습니다: {str(e)}"
             return self.response_integrator.format_error_response(error_msg)
 
-    def execute_tools(self, user_input: str, intent: str) -> Dict[str, Any]:
-        """의도에 따라 적절한 도구 실행"""
-
+    def execute_tools(self, user_input: str, intent: str, history: str = "") -> Dict[str, Any]:
+        """의도에 따라 적절한 도구 실행 (history 전달)"""
         results = {}
-
         if intent == "policy_info":
-            # 정책/정보 질문 → RAG 도구
-            results["rag"] = self.rag_tool.query(user_input)
-
+            results["rag"] = self.rag_tool.query(user_input, history=history)
         elif intent == "prediction":
-            # 발전량 예측 질문 → ML 도구
             parsed_data = self.parse_prediction_request(user_input)
             results["ml"] = self.ml_tool.predict(
                 location=parsed_data["location"],
                 capacity=parsed_data["capacity"]
             )
-
         elif intent == "weather":
-            # 기상 정보 질문 → API 도구
             location = self.extract_location(user_input)
             results["api"] = self.api_tool.get_weather(location)
-
         elif intent == "comprehensive":
-            # 복합 질문 → RAG + ML 도구 병렬 실행
-            results["rag"] = self.rag_tool.query(user_input)
-            
+            results["rag"] = self.rag_tool.query(user_input, history=history)
             parsed_data = self.parse_prediction_request(user_input)
             results["ml"] = self.ml_tool.predict(
                 location=parsed_data["location"],
                 capacity=parsed_data["capacity"]
             )
-
         else:
-            # 기본 응답
             results["default"] = self.generate_default_response(user_input)
-
         return results
 
     def parse_prediction_request(self, user_input: str) -> Dict[str, Any]:

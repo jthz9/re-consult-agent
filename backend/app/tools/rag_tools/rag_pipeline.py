@@ -66,14 +66,17 @@ class RAGPipeline:
 당신은 재생에너지 전문 AI 컨설턴트입니다.
 
 답변 작성 원칙:
-- 내용에 포함된 구체적인 정보, 수치, 절차 등을 중심으로 답변 작성                                                                
+- 내용에 포함된 구체적인 정보, 수치, 절차 등을 중심으로 답변 작성
 - 제목의 불완전한 부분은 무시하고, 내용의 완전한 정보만을 바탕으로 답변
 - 핵심 정보를 간결하고 명확하게 전달
 - 마크다운, 굵은 글씨, 특수 기호 등은 사용하지 말고 일반 텍스트로만 답변
 - 문장이 중간에 끊기거나 불완전한 경우, 자연스럽게 이어서 완성된 문장으로 답변
 
-아래 컨텍스트의 정보만을 바탕으로 답변하세요. 
+아래 [이전 대화]와 [컨텍스트]의 정보만을 바탕으로 답변하세요.
 특히 내용(content)에 포함된 완전한 정보를 우선적으로 활용하세요.
+
+[이전 대화]
+{history}
 
 [컨텍스트]
 {context}
@@ -207,66 +210,49 @@ class RAGPipeline:
             logger.error(f"문서 검색 중 오류 발생: {str(e)}")
             return []
     
-    def query(self, query: str) -> Dict[str, Any]:
-        """질문에 대한 답변 생성
-        
-        Args:
-            query: 사용자 질문
-            
-        Returns:
-            Dict[str, Any]: 답변과 관련 문서 정보
-        """
-        # 검색 실행 (기본 파라미터만 사용)
+    def query(self, query: str, history: Optional[str] = None) -> Dict[str, Any]:
+        """질문에 대한 답변 생성 (이전 대화 히스토리 포함)"""
         docs = self.vectorstore.similarity_search_with_score(query, k=5)
-        
-        # 문서 필터링 (점수 기반)
         filtered_docs = []
         for doc, score in docs:
-            # Chroma는 거리 기반이므로 점수가 낮을수록 유사도가 높음
-            # 거리를 유사도 점수로 변환 (1 / (1 + distance))
             similarity_score = 1 / (1 + score)
-            if similarity_score >= 0.3:  # 유사도 임계값
+            if similarity_score >= 0.3:
                 filtered_docs.append(doc)
-        
-        # 검색된 문서가 없으면 바로 "정보 없음" 응답
         if not filtered_docs:
             logger.warning(f"쿼리 '{query}'에 대한 관련 문서를 찾을 수 없습니다.")
             return {
                 "answer": "죄송합니다. 제공된 컨텍스트에 해당 정보가 없습니다. 다른 질문을 해주시거나, 재생에너지 관련 질문을 구체적으로 말씀해 주세요.",
                 "documents": []
             }
-        
-        # 컨텍스트 생성
         context_parts = []
         seen_content = set()
-        
         for doc in filtered_docs:
-            # 중복 내용 제거
             content_hash = hash(doc.page_content.strip())
             if content_hash not in seen_content:
                 seen_content.add(content_hash)
-                # 문서 내용 정리 (불필요한 공백 제거)
                 cleaned_content = doc.page_content.strip()
-                
-                # 말줄임표로 끝나는 불완전한 문장 제거
                 if cleaned_content and not cleaned_content.endswith('...'):
-                    # 문장 단위로 분리하여 불완전한 문장 필터링
                     sentences = cleaned_content.split('.')
                     valid_sentences = []
                     for sentence in sentences:
                         sentence = sentence.strip()
                         if sentence and not sentence.endswith('...') and len(sentence) > 10:
                             valid_sentences.append(sentence)
-                    
                     if valid_sentences:
                         cleaned_content = '. '.join(valid_sentences) + '.'
                         context_parts.append(cleaned_content)
-        
         context = "\n\n---\n\n".join(context_parts)
-        
-        # 답변 생성
-        response = self.chain.invoke(query)
-        
+        # history가 없으면 빈 문자열로
+        if history is None:
+            history = ""
+        # 답변 생성 (프롬프트에 history 추가)
+        response = self.prompt_template.invoke({
+            "history": history,
+            "context": context,
+            "question": query
+        })
+        response = self.llm.invoke(response)
+        response = StrOutputParser().invoke(response)
         return {
             "answer": self._post_process_response(response),
             "documents": [
