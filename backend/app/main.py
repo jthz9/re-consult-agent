@@ -5,6 +5,7 @@ FastAPI 백엔드 API 서버
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
 import os
 import sys
 
@@ -12,6 +13,15 @@ import sys
 current_dir = os.path.dirname(os.path.abspath(__file__))
 project_root = os.path.dirname(current_dir)
 sys.path.insert(0, project_root)
+
+# Pydantic 모델 정의
+class ChatRequest(BaseModel):
+    message: str
+
+class ChatResponse(BaseModel):
+    status: str
+    message: str
+    response: str
 
 # FastAPI 앱 생성
 app = FastAPI(
@@ -71,23 +81,24 @@ def chatbot_status():
             "error": str(e)
         }
 
-@app.post("/api/chat")
-def chat_with_bot(message: str):
+@app.post("/api/chat", response_model=ChatResponse)
+def chat_with_bot(request: ChatRequest):
     """챗봇과 대화하는 API 엔드포인트"""
     try:
         from app.agents.chatbot_agent import ChatbotAgent
         agent = ChatbotAgent()
-        response = agent.chat(message)
-        return {
-            "status": "success",
-            "message": message,
-            "response": response
-        }
+        response = agent.process_message(request.message)
+        return ChatResponse(
+            status="success",
+            message=request.message,
+            response=response
+        )
     except Exception as e:
-        return {
-            "status": "error",
-            "error": str(e)
-        }
+        return ChatResponse(
+            status="error",
+            message=request.message,
+            response=f"오류가 발생했습니다: {str(e)}"
+        )
 
 @app.get("/api/rag/search")
 def rag_search(query: str, k: int = 3):

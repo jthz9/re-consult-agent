@@ -49,7 +49,7 @@ class RAGPipeline:
         # LLM 초기화
         self.llm = ChatOpenAI(
             model_name=model_name,
-            temperature=0.5
+            temperature=0.3  # 더 일관되고 구조화된 응답을 위해 낮춤
         )
         
         # 임베딩 모델 초기화 (embedding_type에 따라 강제 지정)
@@ -62,7 +62,18 @@ class RAGPipeline:
         self.document_loader = DocumentLoader()
         
         # 프롬프트 템플릿 설정
-        self.prompt_template = ChatPromptTemplate.from_template("""주어진 컨텍스트를 바탕으로 질문에 답변해주세요. 컨텍스트에 있는 정보만을 사용하여 답변하세요.
+        self.prompt_template = ChatPromptTemplate.from_template("""
+당신은 재생에너지 전문 AI 컨설턴트입니다.
+
+답변 작성 원칙:
+- 내용에 포함된 구체적인 정보, 수치, 절차 등을 중심으로 답변 작성                                                                
+- 제목의 불완전한 부분은 무시하고, 내용의 완전한 정보만을 바탕으로 답변
+- 핵심 정보를 간결하고 명확하게 전달
+- 마크다운, 굵은 글씨, 특수 기호 등은 사용하지 말고 일반 텍스트로만 답변
+- 문장이 중간에 끊기거나 불완전한 경우, 자연스럽게 이어서 완성된 문장으로 답변
+
+아래 컨텍스트의 정보만을 바탕으로 답변하세요. 
+특히 내용(content)에 포함된 완전한 정보를 우선적으로 활용하세요.
 
 [컨텍스트]
 {context}
@@ -70,19 +81,8 @@ class RAGPipeline:
 [질문]
 {question}
 
-[답변 형식]
-1. 핵심 답변: 컨텍스트에 있는 정보를 바탕으로 한 직접적인 답변
-2. 상세 설명: 컨텍스트에서 관련된 정보를 인용하여 자세히 설명
-3. 참고 사항: 컨텍스트에서 확인된 추가 정보나 주의사항
-
-[주의사항]
-- 컨텍스트에 있는 정보만을 사용하여 답변하세요
-- 컨텍스트에 없는 정보는 생성하지 마세요
-- 컨텍스트의 정보가 부족한 경우, "제공된 컨텍스트에 해당 정보가 없습니다"라고 답변하세요
-- 답변은 항상 한국어로 작성하세요
-- 컨텍스트의 정보를 왜곡하거나 과장하지 마세요
-
-답변:""")
+답변:
+""")
         
         # RAG 체인 설정
         self.chain = (
@@ -93,7 +93,10 @@ class RAGPipeline:
         )
         
         # 텍스트 분할기 초기화
-        self.text_splitter = TextSplitter()
+        self.text_splitter = TextSplitter(
+            chunk_size=500,  # 더 작은 청크 크기로 문장 중간 절단 방지
+            chunk_overlap=100  # 적절한 중복 유지
+        )
     
     def _initialize_embeddings(self):
         """임베딩 모델 초기화 (embedding_type에 따라 강제 지정)"""
@@ -225,14 +228,47 @@ class RAGPipeline:
             if similarity_score >= 0.3:  # 유사도 임계값
                 filtered_docs.append(doc)
         
+        # 검색된 문서가 없으면 바로 "정보 없음" 응답
+        if not filtered_docs:
+            logger.warning(f"쿼리 '{query}'에 대한 관련 문서를 찾을 수 없습니다.")
+            return {
+                "answer": "죄송합니다. 제공된 컨텍스트에 해당 정보가 없습니다. 다른 질문을 해주시거나, 재생에너지 관련 질문을 구체적으로 말씀해 주세요.",
+                "documents": []
+            }
+        
         # 컨텍스트 생성
-        context = "\n\n".join([doc.page_content for doc in filtered_docs])
+        context_parts = []
+        seen_content = set()
+        
+        for doc in filtered_docs:
+            # 중복 내용 제거
+            content_hash = hash(doc.page_content.strip())
+            if content_hash not in seen_content:
+                seen_content.add(content_hash)
+                # 문서 내용 정리 (불필요한 공백 제거)
+                cleaned_content = doc.page_content.strip()
+                
+                # 말줄임표로 끝나는 불완전한 문장 제거
+                if cleaned_content and not cleaned_content.endswith('...'):
+                    # 문장 단위로 분리하여 불완전한 문장 필터링
+                    sentences = cleaned_content.split('.')
+                    valid_sentences = []
+                    for sentence in sentences:
+                        sentence = sentence.strip()
+                        if sentence and not sentence.endswith('...') and len(sentence) > 10:
+                            valid_sentences.append(sentence)
+                    
+                    if valid_sentences:
+                        cleaned_content = '. '.join(valid_sentences) + '.'
+                        context_parts.append(cleaned_content)
+        
+        context = "\n\n---\n\n".join(context_parts)
         
         # 답변 생성
         response = self.chain.invoke(query)
         
         return {
-            "answer": response,
+            "answer": self._post_process_response(response),
             "documents": [
                 {
                     "content": doc.page_content,
@@ -241,6 +277,52 @@ class RAGPipeline:
                 for doc in filtered_docs
             ]
         }
+    
+    def _post_process_response(self, response: str) -> str:
+        """응답 후처리 - 가독성 향상
+        
+        Args:
+            response: 원본 응답
+            
+        Returns:
+            후처리된 응답
+        """
+        # 불필요한 공백 정리
+        response = response.strip()
+        
+        # 연속된 줄바꿈 정리 (3개 이상을 2개로)
+        import re
+        response = re.sub(r'\n{3,}', '\n\n', response)
+        
+        # 문장 끝 정리
+        response = re.sub(r'\s+([.!?])', r'\1', response)
+        
+        # 마크다운 패턴 제거 (**텍스트** → 텍스트)
+        response = re.sub(r'\*\*(.*?)\*\*', r'\1', response)
+        
+        # 기타 마크다운 패턴 제거
+        response = re.sub(r'\*(.*?)\*', r'\1', response)  # *텍스트* → 텍스트
+        response = re.sub(r'`(.*?)`', r'\1', response)    # `텍스트` → 텍스트
+        
+        # 말줄임표로 끝나는 불완전한 문장 제거
+        lines = response.split('\n')
+        cleaned_lines = []
+        
+        for line in lines:
+            line = line.strip()
+            # 말줄임표로 끝나거나 너무 짧은 문장 제거
+            if line and not line.endswith('...') and len(line) > 10:
+                cleaned_lines.append(line)
+        
+        response = '\n'.join(cleaned_lines)
+        
+        # 참고 문서 섹션에서 불완전한 내용 제거
+        if '📋 참고 문서:' in response:
+            parts = response.split('📋 참고 문서:')
+            main_content = parts[0].strip()
+            response = main_content
+        
+        return response
     
     def load_directory(
         self,
@@ -266,4 +348,29 @@ class RAGPipeline:
         
         if persist:
             # Chroma 저장
-            self.vectorstore.persist() 
+            self.vectorstore.persist()
+    
+    def rebuild_vectorstore(self, documents: List[Dict[str, Any]]) -> None:
+        """벡터 저장소 재구성 (기존 데이터 삭제 후 새로운 분할 방식으로 재구성)
+        
+        Args:
+            documents: 재구성할 문서 리스트
+        """
+        try:
+            # 기존 벡터 저장소 삭제
+            import shutil
+            if os.path.exists(self.persist_directory):
+                shutil.rmtree(self.persist_directory)
+                logger.info(f"기존 벡터 저장소를 삭제했습니다: {self.persist_directory}")
+            
+            # 새로운 벡터 저장소 초기화
+            self.vectorstore = self._initialize_vectorstore()
+            
+            # 문서 재로드
+            self.load_documents(documents)
+            
+            logger.info("벡터 저장소가 새로운 분할 방식으로 재구성되었습니다.")
+            
+        except Exception as e:
+            logger.error(f"벡터 저장소 재구성 중 오류 발생: {str(e)}")
+            raise 

@@ -8,16 +8,17 @@ class ResponseIntegrator:
     """여러 도구의 결과를 통합하여 일관된 응답 생성"""
 
     def format_policy_response(self, rag_result: Dict) -> str:
-        """정책 정보 응답 포맷"""
-        answer = rag_result.get("answer", "정책 정보를 찾을 수 없습니다.")
+        """정책 정보 응답 포맷 (참고문서는 url만, 친근한 말투)"""
+        answer = rag_result.get("answer", "정책 정보를 찾을 수 없어요.")
         documents = rag_result.get("documents", [])
 
         response = f"{answer}\n\n"
-        if documents:
-            response += "📋 참고 문서:\n"
-            for i, doc in enumerate(documents[:3], 1):
-                content = doc.get("content", "")
-                response += f"{i}. {content[:100]}...\n"
+        # 참고문서 url만 제공, 없으면 생략
+        urls = [doc.get("metadata", {}).get("url", "") for doc in documents if doc.get("metadata", {}).get("url", "")]
+        if urls:
+            response += "참고할 만한 자료 링크예요:\n"
+            for i, url in enumerate(urls[:3], 1):
+                response += f"{i}. {url}\n"
         return response
 
     def format_prediction_response(self, ml_result: Dict) -> str:
